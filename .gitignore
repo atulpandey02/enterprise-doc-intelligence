@@ -1,0 +1,7 @@
+.env
+documents/
+hash_store.json
+__pycache__/
+venv/
+*.py[cod]
+.DS_Store
