@@ -487,7 +487,7 @@ streamlit run app.py          # → http://localhost:8501
 
 **Atul Kumar Pandey**
 
-[GitHub](https://github.com/atulpandey02) · [LinkedIn](https://linkedin.com/in/atulkumarpandey)
+[GitHub](https://github.com/atulpandey02) · [LinkedIn](https://linkedin.com/in/atulpandey02)
 
 *Built with Python · Powered by Pinecone + Groq · Orchestrated by Airflow*
 
