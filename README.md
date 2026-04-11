@@ -13,10 +13,64 @@
 
 <br/>
 
+**3 Docker containers &nbsp;·&nbsp; 1 Airflow DAG &nbsp;·&nbsp; 3 tasks &nbsp;·&nbsp; 1,134 Pinecone vectors &nbsp;·&nbsp; 3 document types**
+
+<br/>
+
 > *Supports PDF · Word (.docx) · Plain Text (.txt)*
 > *Semantic search · MD5 change detection · Airflow orchestration*
 
 </div>
+
+---
+
+## Table of Contents
+
+- [How It Works](#how-it-works)
+- [What Makes This Different](#what-makes-this-different)
+- [Architecture](#architecture)
+- [Pipeline in Action](#pipeline-in-action)
+- [Tech Stack](#tech-stack)
+- [Infrastructure](#infrastructure)
+- [Project Structure](#project-structure)
+- [How Each File Works](#how-each-file-works)
+- [System Flow](#system-flow)
+- [Airflow DAG — Deep Dive](#airflow-dag--deep-dive)
+- [Change Detection — How MD5 Works](#change-detection--how-md5-works)
+- [Chunking Strategy](#chunking-strategy)
+- [Recommended Documents for Demo](#recommended-documents-for-demo)
+- [Getting Started](#getting-started)
+- [Key Debugging Lessons](#key-debugging-lessons)
+- [Running Commands Reference](#running-commands-reference)
+- [Future Enhancements](#future-enhancements)
+
+---
+
+## How It Works
+
+Five steps from a dropped file to a grounded AI answer:
+
+```
+1. Airflow detects   →  new or changed document in documents/ folder (every 6 hours)
+2. MD5 hash check   →  only changed files are processed — 100 docs + 1 change = 1 file
+3. Extract + chunk  →  PyMuPDF / python-docx → recursive splitter → 500-char chunks
+4. Embed + store    →  sentence-transformers (local CPU) → 384-dim vectors → Pinecone
+5. Answer question  →  user asks → embed query → cosine search → Groq Llama3 → citation
+```
+
+---
+
+## What Makes This Different
+
+Most RAG tutorials use a static document store. This system is built for real enterprise use:
+
+| Feature | How It Works |
+|---|---|
+| **MD5 change detection** | Only re-embeds files that actually changed — 100 docs + 1 change = 1 file processed |
+| **Airflow orchestration** | Runs every 6 hours automatically with failure alerts and retry logic |
+| **Three document types** | PDF (multi-page), Word (paragraphs + tables), plain text — one unified pipeline |
+| **Semantic search** | Finds meaning not just keywords — "Apple income" finds "Apple net sales" |
+| **Source citations** | Every answer shows which file, which chunk, and similarity score |
 
 ---
 
@@ -57,17 +111,148 @@
 
 ---
 
-## What Makes This Different
+## Tech Stack
 
-Most RAG tutorials use a static document store. This system is built for real enterprise use:
+| Layer | Technology | Purpose |
+|---|---|---|
+| **Orchestration** | Apache Airflow 2.9.3 | Schedule + monitor ingestion pipeline |
+| **Document extraction** | PyMuPDF, python-docx | Read PDF, Word, and text files |
+| **Text chunking** | Custom recursive splitter | 500-char chunks, 50-char overlap |
+| **Embeddings** | sentence-transformers all-MiniLM-L6-v2 | 384-dim, free, runs locally on CPU |
+| **Vector DB** | Pinecone (serverless) | Store and search 1,134+ vectors |
+| **LLM** | Groq llama-3.1-8b-instant | Fast grounded answer generation |
+| **UI** | Streamlit | Document chat + manager dashboard |
+| **Infrastructure** | Docker Compose | Containerised Airflow + Postgres |
+| **Change detection** | MD5 hashing | Detect document changes reliably |
 
-| Feature | How It Works |
+---
+
+## Infrastructure
+
+### Docker Services (3 containers)
+
+| Service | Role |
 |---|---|
-| **MD5 change detection** | Only re-embeds files that actually changed — 100 docs + 1 change = 1 file processed |
-| **Airflow orchestration** | Runs every 6 hours automatically with failure alerts and retry logic |
-| **Three document types** | PDF (multi-page), Word (paragraphs + tables), plain text — one unified pipeline |
-| **Semantic search** | Finds meaning not just keywords — "Apple income" finds "Apple net sales" |
-| **Source citations** | Every answer shows which file, which chunk, and similarity score |
+| `airflow-webserver` | Airflow UI at localhost:8080 — DAG monitoring and manual triggers |
+| `airflow-scheduler` | Runs the 6-hour schedule, pushes tasks to executor |
+| `postgres` | Airflow metadata database — DAG state, task history, XCom storage |
+
+> Streamlit runs separately on your local terminal — not inside Docker.
+
+---
+
+## Project Structure
+
+```
+enterprise-doc-intelligence/
+│
+├── Dockerfile                              ← custom Airflow image with all deps
+├── docker-compose.yaml                     ← Airflow + Postgres setup
+├── requirements.txt                        ← local development dependencies
+├── run_pipeline.py                         ← manual pipeline trigger from root
+├── hash_store.json                         ← auto-created, gitignored, tracks MD5 hashes
+├── .env                                    ← your API keys (never committed)
+├── .env.example                            ← template with all required keys
+├── .gitignore
+├── README.md
+│
+├── documents/                              ← drop your PDF/DOCX/TXT files here
+│   └── (your documents go here)
+│
+├── docs/
+│   └── images/                            ← screenshots for this README
+│       ├── architecture.png
+│       ├── airflow_dag.png
+│       ├── streamlit_chat.png
+│       ├── streamlit_manager.png
+│       └── pinecone_index.png
+│
+└── src/
+    │
+    ├── ingestion/                          ← core processing modules
+    │   ├── __init__.py
+    │   ├── document_processor.py           ← extract text from PDF/DOCX/TXT
+    │   ├── chunker.py                      ← recursive text splitting
+    │   └── hash_tracker.py                ← MD5 change detection
+    │
+    ├── pipeline/
+    │   ├── __init__.py
+    │   └── rag_pipeline.py                ← full ingestion orchestration
+    │
+    ├── airflow/
+    │   └── dags/
+    │       ├── document_ingestion_dag.py   ← 3-task Airflow DAG
+    │       └── scripts/                   ← flat copies of all scripts for Airflow
+    │           ├── document_processor.py
+    │           ├── chunker.py
+    │           ├── hash_tracker.py
+    │           └── rag_pipeline.py
+    │
+    └── app/
+        ├── app.py                          ← Streamlit landing page
+        └── pages/
+            ├── 1_Document_Chat.py          ← Q&A chat interface
+            └── 2_Document_Manager.py       ← index stats + manual trigger
+```
+
+---
+
+## How Each File Works
+
+### `src/ingestion/document_processor.py`
+Reads a file and extracts raw text.
+- **PDF** — PyMuPDF reads each page, joins with page markers `[Page N]`
+- **Word** — python-docx reads paragraphs and table cells
+- **TXT** — direct file read with UTF-8 / latin-1 fallback
+- Returns `{file_name, file_type, text, char_count}` or `None` on failure
+
+### `src/ingestion/chunker.py`
+Splits long text into overlapping chunks for embedding.
+- Tries paragraph breaks (`\n\n`) first — preserves natural structure
+- Falls back to sentence breaks (`. `) then word breaks (` `)
+- Each chunk ≤ 500 chars with 50-char overlap for context continuity at boundaries
+- Attaches full metadata to every chunk: file name, type, index, total count
+
+### `src/ingestion/hash_tracker.py`
+Detects which documents changed since the last pipeline run.
+- Computes MD5 fingerprint of each file on every run
+- Compares against `hash_store.json` from previous run
+- Returns three lists: new files, changed files, deleted files
+- **Why MD5 not `mtime`?** File copy changes `mtime` even if content is identical. MD5 only changes when actual bytes change
+
+### `src/pipeline/rag_pipeline.py`
+The main orchestration script — ties everything together.
+- Calls hash_tracker to detect changes
+- Calls document_processor to extract text
+- Calls chunker to split into pieces
+- Embeds each chunk using sentence-transformers (local, free, no API needed)
+- Stores text in Pinecone metadata so retrieval has actual content
+- Upserts vectors + metadata into Pinecone in batches of 50
+- Deletes vectors for removed documents before re-ingesting
+- Updates `hash_store.json` for next comparison
+
+### `src/airflow/dags/document_ingestion_dag.py`
+Three-task Airflow DAG running every 6 hours.
+- **Task 1** `scan_for_changes` — detect what needs processing, push to XCom
+- **Task 2** `ingest_documents` — run full pipeline, skip cleanly if no changes
+- **Task 3** `pipeline_summary` — log results and live Pinecone vector count
+- `on_failure_callback` fires on any task failure with full error context and log URL
+
+### `src/app/pages/1_Document_Chat.py`
+The Q&A interface.
+- Embeds user question → Pinecone search → top 5 chunks
+- Filter by specific document or ask across all documents
+- Uses `$eq` operator for Pinecone filter to ensure correct document matching
+- Groq generates grounded answer citing source filenames
+- Source cards show file name, chunk index, text excerpt, similarity score
+
+### `src/app/pages/2_Document_Manager.py`
+Admin dashboard.
+- Live Pinecone stats: total vectors, documents indexed, index status
+- Per-document chunk counts with progress bars via `st.column_config.ProgressColumn`
+- Local documents folder listing with file sizes
+- Manual pipeline trigger without needing Airflow
+- Refresh button to pull latest stats
 
 ---
 
@@ -131,241 +316,6 @@ Streamlit UI
   Each source card shows:
     file_name, chunk index, similarity score,
     text excerpt (first 200 chars)
-```
-
----
-
-## Tech Stack
-
-| Layer | Technology | Purpose |
-|---|---|---|
-| **Orchestration** | Apache Airflow 2.9.3 | Schedule + monitor ingestion pipeline |
-| **Document extraction** | PyMuPDF, python-docx | Read PDF, Word, and text files |
-| **Text chunking** | Custom recursive splitter | 500-char chunks, 50-char overlap |
-| **Embeddings** | sentence-transformers all-MiniLM-L6-v2 | 384-dim, free, runs locally on CPU |
-| **Vector DB** | Pinecone (serverless) | Store and search 1,134+ vectors |
-| **LLM** | Groq llama-3.1-8b-instant | Fast grounded answer generation |
-| **UI** | Streamlit | Document chat + manager dashboard |
-| **Infrastructure** | Docker Compose | Containerised Airflow + Postgres |
-| **Change detection** | MD5 hashing | Detect document changes reliably |
-
----
-
-## Project Structure
-
-```
-enterprise-doc-intelligence/
-│
-├── Dockerfile                              ← custom Airflow image with all deps
-├── docker-compose.yaml                     ← Airflow + Postgres setup
-├── requirements.txt                        ← local development dependencies
-├── run_pipeline.py                         ← manual pipeline trigger from root
-├── hash_store.json                         ← auto-created, tracks MD5 hashes
-├── .env                                    ← your API keys (never committed)
-├── .env.example                            ← template with all required keys
-├── .gitignore
-├── README.md
-│
-├── documents/                              ← drop your PDF/DOCX/TXT files here
-│   └── (your documents go here)
-│
-├── docs/
-│   └── images/                            ← screenshots go here
-│       ├── architecture.png
-│       ├── airflow_dag.png
-│       ├── streamlit_chat.png
-│       ├── streamlit_manager.png
-│       └── pinecone_index.png
-│
-└── src/
-    │
-    ├── ingestion/                          ← core processing modules
-    │   ├── __init__.py
-    │   ├── document_processor.py           ← extract text from PDF/DOCX/TXT
-    │   ├── chunker.py                      ← recursive text splitting
-    │   └── hash_tracker.py                ← MD5 change detection
-    │
-    ├── pipeline/
-    │   ├── __init__.py
-    │   └── rag_pipeline.py                ← full ingestion orchestration
-    │
-    ├── airflow/
-    │   └── dags/
-    │       ├── document_ingestion_dag.py   ← 3-task Airflow DAG
-    │       └── scripts/                   ← copies of all scripts for Airflow
-    │           ├── document_processor.py
-    │           ├── chunker.py
-    │           ├── hash_tracker.py
-    │           └── rag_pipeline.py
-    │
-    └── app/
-        ├── app.py                          ← Streamlit landing page
-        └── pages/
-            ├── 1_Document_Chat.py          ← Q&A chat interface
-            └── 2_Document_Manager.py       ← index stats + manual trigger
-```
-
----
-
-## How Each File Works
-
-### `src/ingestion/document_processor.py`
-Reads a file and extracts raw text.
-- **PDF** → PyMuPDF reads each page, joins with page markers `[Page N]`
-- **Word** → python-docx reads paragraphs and table cells
-- **TXT** → direct file read with UTF-8 / latin-1 fallback
-- Returns `{file_name, file_type, text, char_count}` or `None` on failure
-
-### `src/ingestion/chunker.py`
-Splits long text into overlapping chunks for embedding.
-- Tries paragraph breaks (`\n\n`) first — preserves natural structure
-- Falls back to sentence breaks (`. `) then word breaks (` `)
-- Each chunk ≤ 500 chars with 50-char overlap for context continuity at boundaries
-- Attaches full metadata to every chunk: file name, type, index, total count
-
-### `src/ingestion/hash_tracker.py`
-Detects which documents changed since the last pipeline run.
-- Computes MD5 fingerprint of each file on every run
-- Compares against `hash_store.json` from previous run
-- Returns three lists: new files, changed files, deleted files
-- **Why MD5 not `mtime`?** File copy changes `mtime` even if content is identical. MD5 only changes when actual bytes change
-
-### `src/pipeline/rag_pipeline.py`
-The main orchestration script — ties everything together.
-- Calls hash_tracker → detect changes
-- Calls document_processor → extract text
-- Calls chunker → split into pieces
-- Embeds each chunk using sentence-transformers (local, free, no API needed)
-- Stores text in Pinecone metadata so retrieval has actual content
-- Upserts vectors + metadata into Pinecone in batches of 50
-- Deletes vectors for removed documents before re-ingesting
-- Updates hash_store.json for next comparison
-
-### `src/airflow/dags/document_ingestion_dag.py`
-Three-task Airflow DAG running every 6 hours.
-- **Task 1** `scan_for_changes` — detect what needs processing, push to XCom
-- **Task 2** `ingest_documents` — run full pipeline, skip cleanly if no changes
-- **Task 3** `pipeline_summary` — log results and live Pinecone vector count
-- `on_failure_callback` fires on any task failure with full error context and log URL
-
-### `src/app/pages/1_Document_Chat.py`
-The Q&A interface.
-- Embeds user question → Pinecone search → top 5 chunks
-- Filter by specific document or ask across all documents
-- Uses `$eq` operator for Pinecone filter to ensure correct document matching
-- Groq generates grounded answer citing source filenames
-- Source cards show file name, chunk index, text excerpt, similarity score
-
-### `src/app/pages/2_Document_Manager.py`
-Admin dashboard.
-- Live Pinecone stats: total vectors, documents indexed, index status
-- Per-document chunk counts with progress bars via `st.column_config.ProgressColumn`
-- Local documents folder listing with file sizes
-- Manual pipeline trigger without needing Airflow
-- Refresh button to pull latest stats
-
----
-
-## Getting Started
-
-### Prerequisites
-- Docker Desktop (4GB+ RAM allocated)
-- Python 3.11+
-- Free API keys: [Pinecone](https://app.pinecone.io) · [Groq](https://console.groq.com)
-
-### 1. Clone the Repository
-
-```bash
-git clone https://github.com/atulpandey02/enterprise-doc-intelligence.git
-cd enterprise-doc-intelligence
-```
-
-### 2. Configure Environment Variables
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env`:
-
-```bash
-# Pinecone — app.pinecone.io
-PINECONE_API_KEY=your_pinecone_api_key
-PINECONE_INDEX_NAME=doc-intelligence
-
-# Groq — console.groq.com
-GROQ_API_KEY=your_groq_api_key
-
-# Paths (leave as default for local setup)
-DOCUMENTS_FOLDER=documents
-HASH_STORE_PATH=hash_store.json
-```
-
-### 3. Add Documents
-
-```bash
-# Copy any PDF, Word, or text files into the watched folder
-cp ~/Downloads/your_document.pdf documents/
-```
-
-### 4. Build and Start Docker
-
-```bash
-# Build custom image — first time takes 5-10 mins (downloads PyTorch)
-docker-compose build
-
-# Start all services
-docker-compose up -d
-
-# Verify containers are running
-docker ps
-```
-
-You should see:
-```
-enterprise-airflow-webserver   running   0.0.0.0:8080→8080
-enterprise-airflow-scheduler   running
-enterprise-postgres            running
-```
-
-### 5. Trigger the Airflow DAG
-
-```
-Open:    http://localhost:8080
-Login:   airflow / airflow
-Find:    document_intelligence_pipeline
-Click:   ▶ Trigger DAG
-```
-
-All 3 tasks should go green:
-```
-scan_for_changes    ✅
-ingest_documents    ✅
-pipeline_summary    ✅
-```
-
-### 6. Launch Streamlit
-
-```bash
-# New terminal — activate venv
-source venv/bin/activate
-
-# Install dependencies (first time only)
-pip install -r requirements.txt
-
-# Launch
-cd src/app
-streamlit run app.py
-# Opens at http://localhost:8501
-```
-
-### 7. Ask Questions
-
-```
-Select a document in the sidebar (or leave as "All Documents")
-Ask: "What are the key findings?"
-Ask: "What does this say about [specific topic]?"
-Ask: "Summarise the main conclusions."
 ```
 
 ---
@@ -473,7 +423,115 @@ These three demonstrate the system works across technical documentation, financi
 
 ---
 
+## Getting Started
+
+> Full setup takes approximately 15–20 minutes including Docker building the custom image.
+
+### Prerequisites
+
+- Docker Desktop (4GB+ RAM allocated)
+- Python 3.11+
+- Free API keys: [Pinecone](https://app.pinecone.io) · [Groq](https://console.groq.com)
+
+### 1. Clone the Repository
+
+```bash
+git clone https://github.com/atulpandey02/enterprise-doc-intelligence.git
+cd enterprise-doc-intelligence
+```
+
+### 2. Configure Environment Variables
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env`:
+
+```bash
+# Pinecone — app.pinecone.io
+PINECONE_API_KEY=your_pinecone_api_key
+PINECONE_INDEX_NAME=doc-intelligence
+
+# Groq — console.groq.com
+GROQ_API_KEY=your_groq_api_key
+
+# Paths (leave as default for local setup)
+DOCUMENTS_FOLDER=documents
+HASH_STORE_PATH=hash_store.json
+```
+
+### 3. Add Documents
+
+```bash
+# Copy any PDF, Word, or text files into the watched folder
+cp ~/Downloads/your_document.pdf documents/
+```
+
+### 4. Build and Start Docker
+
+```bash
+# Build custom image — first time takes 5-10 mins (downloads PyTorch)
+docker-compose build
+
+# Start all services
+docker-compose up -d
+
+# Verify containers are running
+docker ps
+```
+
+You should see:
+```
+enterprise-airflow-webserver   running   0.0.0.0:8080→8080
+enterprise-airflow-scheduler   running
+enterprise-postgres            running
+```
+
+### 5. Trigger the Airflow DAG
+
+```
+Open:    http://localhost:8080
+Login:   airflow / airflow
+Find:    document_intelligence_pipeline
+Click:   ▶ Trigger DAG
+```
+
+All 3 tasks should go green:
+```
+scan_for_changes    ✅
+ingest_documents    ✅
+pipeline_summary    ✅
+```
+
+### 6. Launch Streamlit
+
+```bash
+# New terminal — create and activate venv (first time only)
+python -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+
+# Launch
+cd src/app
+streamlit run app.py
+# Opens at http://localhost:8501
+```
+
+### 7. Ask Questions
+
+```
+Select a document in the sidebar (or leave as "All Documents")
+Ask: "What are the key findings?"
+Ask: "What does this say about [specific topic]?"
+Ask: "Summarise the main conclusions."
+```
+
+---
+
 ## Key Debugging Lessons
+
+> These are real bugs hit during development — each one taught something about production RAG pipelines that no tutorial covers.
 
 | Problem | Root Cause | Fix Applied |
 |---|---|---|
@@ -490,7 +548,7 @@ These three demonstrate the system works across technical documentation, financi
 
 ## Future Enhancements
 
-- **Hybrid retrieval** — combine BM25 keyword search with vector similarity for precise technical term lookups (e.g. exact financial figures, code snippets)
+- **Hybrid retrieval** — combine BM25 keyword search with vector similarity for precise technical term lookups such as exact financial figures and code snippets
 - **Page-level citations** — store page numbers in Pinecone metadata so answers cite "apple_10k.pdf, Page 47" instead of just chunk index
 - **Document upload via UI** — `st.file_uploader()` in Streamlit to ingest directly without touching the documents/ folder
 - **Re-ranking** — cross-encoder model to re-rank top-20 results before passing to LLM for higher precision answers
@@ -514,7 +572,7 @@ python run_pipeline.py                        # ingest documents manually
 # Streamlit UI
 source venv/bin/activate
 cd src/app
-streamlit run app.py                          # → http://localhost:8501
+streamlit run app.py                          # opens at http://localhost:8501
 
 # Airflow UI
 # http://localhost:8080
@@ -527,7 +585,7 @@ streamlit run app.py                          # → http://localhost:8501
 
 **Atul Kumar Pandey**
 
-[GitHub](https://github.com/atulpandey02) · [LinkedIn](https://linkedin.com/in/atulkumarpandey)
+[GitHub](https://github.com/atulpandey02) &nbsp;·&nbsp; [LinkedIn](https://www.linkedin.com/in/atulpandey02/)
 
 *Built with Python · Powered by Pinecone + Groq · Orchestrated by Airflow*
 
